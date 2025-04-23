@@ -7,7 +7,7 @@ pins = [17, 18, 27]
 clock = 18      
 receiver = GpioReceiver(pins, clock)
 
-received_text = receiver.receive_text(12)  # Länge des Textes in Zeichen
+received_text = receiver.receive_text()  # Länge des Textes in Zeichen
 print(f"Empfangener Text: {received_text}")
 
 receiver.close()
