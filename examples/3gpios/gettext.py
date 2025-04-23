@@ -4,7 +4,8 @@ from gpio_comm.gpio_comm import GpioReceiver  # Import der bereits definierten K
 
 # Beispiel: Text empfangen
 pins = [17, 18, 27]
-receiver = GpioReceiver(pins)
+clock = 18      
+receiver = GpioReceiver(pins, clock)
 
 received_text = receiver.receive_text(12)  # Länge des Textes in Zeichen
 print(f"Empfangener Text: {received_text}")
