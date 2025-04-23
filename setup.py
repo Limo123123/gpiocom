@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="gpiocom",
-    version="0.1.2",
+    version="0.1.3",
     author="Florian Töns",
     description="Schnelle GPIO-Kommunikation für Raspberry Pi",
     long_description=open('README.md').read(),
