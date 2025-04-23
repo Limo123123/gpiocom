@@ -1,131 +1,194 @@
+# gpio_comm.py
+
 import time
 import os
+import struct
 import lgpio
 
-class GpioSender:
-    def __init__(self, pins, gpio_chip=0):
-        self.gpio_chip = gpio_chip  # GPIO-Chip-Nummer
-        self.pins = pins
-        self.validate_pins()
-        self.handle = lgpio.gpiochip_open(self.gpio_chip)  # Öffne GPIO-Handle für Chip
+START_MARKER = 0x02
+STOP_MARKER  = 0x03
+CHUNK_SIZE   = 64  # Bytes pro Paket
 
-    def validate_pins(self):
-        """Stellt sicher, dass genügend Pins für die Kommunikation vorhanden sind."""
-        if len(self.pins) < 3:  # Minimalanzahl von Pins für einfache Kommunikation
-            raise ValueError("Mindestens 3 GPIO-Pins müssen angegeben werden.")
-    
-    def write_pin(self, pin, value):
-        """Setzt den Wert eines bestimmten Pins (1 oder 0)."""
-        lgpio.gpio_write(self.handle, pin, value)
-    
+class GpioSender:
+    def __init__(self, data_pins, clock_pin, gpio_chip=0, delay=0.001):
+        """
+        data_pins: Liste von GPIO-Nummern (BCM), in paralleler Busbreite.
+        clock_pin: GPIO-Nummer für Clock/Handshake.
+        gpio_chip: Nummer des gpiochip (meist 0).
+        delay:   Pause zwischen Clock-Flanken in Sekunden.
+        """
+        self.pins     = data_pins
+        self.clk      = clock_pin
+        self.bus_w    = len(self.pins)
+        self.delay    = delay
+        self.h        = lgpio.gpiochip_open(gpio_chip)
+        # Pins claimen
+        for p in self.pins:
+            lgpio.gpio_claim_output(self.h, p)
+        lgpio.gpio_claim_output(self.h, self.clk)
+
+    def _write_group(self, bits):
+        # bits: Liste von 0/1 der Länge bus_w
+        for pin, bit in zip(self.pins, bits):
+            lgpio.gpio_write(self.h, pin, bit)
+        # Clock-Flanke
+        lgpio.gpio_write(self.h, self.clk, 1)
+        time.sleep(self.delay)
+        lgpio.gpio_write(self.h, self.clk, 0)
+        time.sleep(self.delay)
+
+    def _send_frame(self, payload_bytes):
+        # 1) START
+        self._send_raw_byte(START_MARKER)
+        # 2) Payload
+        for b in payload_bytes:
+            self._send_raw_byte(b)
+        # 3) Checksumme
+        checksum = sum(payload_bytes) & 0xFF
+        self._send_raw_byte(checksum)
+        # 4) STOP
+        self._send_raw_byte(STOP_MARKER)
+
+    def _send_raw_byte(self, byte):
+        # Byte in Gruppen zu bus_w Bits aufteilen
+        bits = [(byte >> i) & 1 for i in range(8)]
+        # Senden in Gruppen
+        for i in range(0, 8, self.bus_w):
+            grp = bits[i:i+self.bus_w]
+            # Padd mit 0, falls grp < bus_w
+            grp += [0] * (self.bus_w - len(grp))
+            self._write_group(grp)
+
     def send_text(self, text):
-        """Sendet Textdaten als Binärdaten über GPIO."""
-        binary_data = ''.join(format(ord(c), '08b') for c in text)  # Text zu Binär umwandeln
-        self.send_binary(binary_data)
-        
+        self._send_frame(text.encode('utf-8'))
+
     def send_number(self, number):
-        """Sendet eine Zahl als Binärdaten."""
-        binary_data = format(number, '08b')  # Zahl zu Binär umwandeln
-        self.send_binary(binary_data)
-        
-    def send_binary(self, binary_data):
-        """Sendet Binärdaten über die GPIO-Pins."""
-        for i, bit in enumerate(binary_data):
-            self.write_pin(self.pins[i % len(self.pins)], 1 if bit == '1' else 0)
-            time.sleep(0.1)  # Pause für Stabilität
+        # 4-Byte Big-Endian
+        num_bytes = number.to_bytes(4, 'big', signed=False)
+        self._send_frame(num_bytes)
 
     def send_file(self, file_path):
-        """Sendet eine Datei in Paketen über die GPIO-Pins."""
-        if not os.path.isfile(file_path):
-            raise ValueError(f"Die Datei {file_path} existiert nicht.")
-        
-        total_size = os.path.getsize(file_path)
+        name = os.path.basename(file_path).encode('utf-8')
+        size = os.path.getsize(file_path)
+        # Header: Dateiname und Dateigröße
+        header = struct.pack('>H', len(name)) + name + struct.pack('>I', size)
+        self._send_frame(header)
+        # Daten in CHUNK_SIZE-Paketen
         with open(file_path, 'rb') as f:
-            data = f.read()
-
-        total_sent = 0
-        for i in range(0, len(data), 64):  # Paketgröße 64 Bytes
-            packet = data[i:i + 64]
-            self.send_packet(packet)
-            total_sent += len(packet)
-            progress = (total_sent / total_size) * 100
-            print(f"Fortschritt: {progress:.2f}%")
-            time.sleep(0.1)
-    
-    def send_packet(self, packet):
-        """Sendet ein Paket über GPIO-Pins."""
-        for byte in packet:
-            for bit in format(byte, '08b'):
-                self.write_pin(self.pins[0], 1 if bit == '1' else 0)  # Nur ein Pin, zur Vereinfachung
-            time.sleep(0.1)  # Pause für Stabilität
+            while True:
+                chunk = f.read(CHUNK_SIZE)
+                if not chunk:
+                    break
+                self._send_frame(chunk)
 
     def send_folder(self, folder_path):
-        """Sendet alle Dateien in einem Ordner als Pakete über GPIO."""
-        if not os.path.isdir(folder_path):
-            raise ValueError(f"Der Ordner {folder_path} existiert nicht.")
-        
-        files = os.listdir(folder_path)
-        for file_name in files:
-            file_path = os.path.join(folder_path, file_name)
-            self.send_file(file_path)
-    
+        files = [f for f in os.listdir(folder_path) if os.path.isfile(os.path.join(folder_path,f))]
+        # Erst Header mit Anzahl Dateien
+        header = struct.pack('>H', len(files))
+        self._send_frame(header)
+        # Dann jede Datei
+        for fn in files:
+            self.send_file(os.path.join(folder_path, fn))
+
     def close(self):
-        """Schließt den GPIO-Handle nach der Nutzung."""
-        lgpio.gpiochip_close(self.handle)
-        
+        lgpio.gpiochip_close(self.h)
+
+
 class GpioReceiver:
-    def __init__(self, pins, gpio_chip=0):
-        self.gpio_chip = gpio_chip  # GPIO-Chip-Nummer
-        self.pins = pins
-        self.validate_pins()
-        self.handle = lgpio.gpiochip_open(self.gpio_chip)  # Öffne GPIO-Handle für Chip
+    def __init__(self, data_pins, clock_pin, gpio_chip=0, delay=0.001):
+        self.pins  = data_pins
+        self.clk   = clock_pin
+        self.bus_w = len(self.pins)
+        self.delay = delay
+        self.h     = lgpio.gpiochip_open(gpio_chip)
+        # Pins claimen
+        for p in self.pins:
+            lgpio.gpio_claim_input(self.h, p)
+        lgpio.gpio_claim_input(self.h, self.clk)
 
-    def validate_pins(self):
-        """Stellt sicher, dass genügend Pins für die Kommunikation vorhanden sind."""
-        if len(self.pins) < 3:
-            raise ValueError("Mindestens 3 GPIO-Pins müssen angegeben werden.")
-    
-    def read_pin(self, pin):
-        """Liest den Wert eines bestimmten GPIO-Pins."""
-        return lgpio.gpio_read(self.handle, pin)
+    def _read_group(self):
+        # Warten auf Clock-Flanke 0→1
+        while lgpio.gpio_read(self.h, self.clk) == 0: pass
+        # Daten lesen
+        bits = [lgpio.gpio_read(self.h, p) for p in self.pins]
+        # Warten auf Flanke 1→0
+        while lgpio.gpio_read(self.h, self.clk) == 1: pass
+        time.sleep(self.delay)
+        return bits
 
-    def receive_binary(self, length):
-        """Empfängt Binärdaten über die GPIO-Pins."""
-        binary_data = ''
-        for _ in range(length):
-            bit = self.read_pin(self.pins[0])  # Ein Pin wird hier zum Ablesen verwendet
-            binary_data += str(bit)
-            time.sleep(0.1)  # Warten, um das Signal korrekt zu empfangen
-        return binary_data
-    
-    def receive_text(self, length):
-        """Empfängt Textdaten über die GPIOs."""
-        binary_data = self.receive_binary(length * 8)  # Text ist eine Folge von 8-Bit-Zeichen
-        text = ''.join(chr(int(binary_data[i:i+8], 2)) for i in range(0, len(binary_data), 8))
-        return text
-    
-    def receive_number(self):
-        """Empfängt eine Zahl über die GPIOs."""
-        binary_data = self.receive_binary(8)  # Eine Zahl ist 8 Bit
-        return int(binary_data, 2)
-    
-    def receive_file(self, folder_path, file_name):
-        """Empfängt eine Datei und speichert sie auf dem lokalen Dateisystem."""
-        file_path = os.path.join(folder_path, file_name)
-        with open(file_path, 'wb') as f:
-            while True:
-                packet = self.receive_binary(64)  # Paketgröße von 64 Bytes
-                if not packet:
-                    break
-                f.write(bytearray(int(packet[i:i+8], 2) for i in range(0, len(packet), 8)))
-        print(f"Datei empfangen: {file_path}")
-    
-    def receive_folder(self, folder_path):
-        """Empfängt alle Dateien eines Ordners."""
+    def _receive_frame(self):
+        # Byte-Stream rekonstruieren
+        buf_bits = []
+        payload = []
+        # 1) START abwarten
         while True:
-            # Hier könnte eine Möglichkeit eingebaut werden, um die Ordnerstruktur zu empfangen
-            pass
-    
+            bits = self._read_group()
+            buf_bits += bits
+            if len(buf_bits) >= 8:
+                byte = 0
+                for i in range(8):
+                    byte |= (buf_bits[i] << i)
+                buf_bits = buf_bits[8:]
+                if byte == START_MARKER:
+                    break
+        # 2) Payload bis STOP
+        while True:
+            # Nächstes Byte
+            while len(buf_bits) < 8:
+                buf_bits += self._read_group()
+            byte = 0
+            for i in range(8):
+                byte |= (buf_bits[i] << i)
+            buf_bits = buf_bits[8:]
+            if byte == STOP_MARKER:
+                break
+            payload.append(byte)
+        # 3) Trenne Checksumme
+        if len(payload) < 1:
+            raise RuntimeError("Frame ohne Payload")
+        recv_checksum = payload[-1]
+        data = payload[:-1]
+        calc_checksum = sum(data) & 0xFF
+        if recv_checksum != calc_checksum:
+            raise RuntimeError(f"Checksum error: got {recv_checksum}, calc {calc_checksum}")
+        return bytes(data)
+
+    def receive_text(self) -> str:
+        data = self._receive_frame()
+        return data.decode('utf-8', errors='replace')
+
+    def receive_number(self) -> int:
+        data = self._receive_frame()
+        if len(data) != 4:
+            raise RuntimeError(f"Invalid number length: {len(data)}")
+        return int.from_bytes(data, 'big', signed=False)
+
+    def receive_file(self, out_folder):
+        # Header empfangen
+        hdr = self._receive_frame()
+        # Header: 2-Byte Name-Länge, Name, 4-Byte Size
+        name_len = struct.unpack('>H', hdr[:2])[0]
+        name     = hdr[2:2+name_len].decode('utf-8')
+        size     = struct.unpack('>I', hdr[2+name_len:6+name_len])[0]
+        # Datei anlegen
+        path = os.path.join(out_folder, name)
+        with open(path, 'wb') as f:
+            received = 0
+            while received < size:
+                chunk = self._receive_frame()
+                f.write(chunk)
+                received += len(chunk)
+        return path
+
+    def receive_folder(self, out_folder):
+        # Header: Anzahl Dateien (2-Byte)
+        hdr = self._receive_frame()
+        count = struct.unpack('>H', hdr)[0]
+        paths = []
+        for _ in range(count):
+            p = self.receive_file(out_folder)
+            paths.append(p)
+        return paths
+
     def close(self):
-        """Schließt den GPIO-Handle nach der Nutzung."""
-        lgpio.gpiochip_close(self.handle)
+        lgpio.gpiochip_close(self.h)
