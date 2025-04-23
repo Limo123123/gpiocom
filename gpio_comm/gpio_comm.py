@@ -107,14 +107,11 @@ class GpioReceiver:
         lgpio.gpio_claim_input(self.h, self.clk)
 
     def _read_group(self):
-        # Warten auf Clock-Flanke 0→1
-        while lgpio.gpio_read(self.h, self.clk) == 0: pass
-        # Daten lesen
-        bits = [lgpio.gpio_read(self.h, p) for p in self.pins]
-        # Warten auf Flanke 1→0
-        while lgpio.gpio_read(self.h, self.clk) == 1: pass
-        time.sleep(self.delay)
+    """Lese eine Gruppe von Pins synchron mit Clock."""
+        self._wait_for_clock()  # Hier wird jetzt richtig auf die Flanke gewartet!
+        bits = [lgpio.gpio_read(self.h, pin) for pin in self.data_pins]
         return bits
+
 
     def _receive_frame(self):
         # Byte-Stream rekonstruieren
@@ -192,3 +189,14 @@ class GpioReceiver:
 
     def close(self):
         lgpio.gpiochip_close(self.h)
+
+    def _wait_for_clock(self):
+    """Warte auf eine steigende Flanke des Clock-Pins."""
+    last_state = lgpio.gpio_read(self.h, self.clk)
+    while True:
+        current_state = lgpio.gpio_read(self.h, self.clk)
+        if last_state == 0 and current_state == 1:
+            break
+        last_state = current_state
+        time.sleep(0.00001)  # Kleine Pause, spart CPU
+
