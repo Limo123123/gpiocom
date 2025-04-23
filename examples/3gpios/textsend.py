@@ -4,7 +4,8 @@ from gpio_comm.gpio_comm import GpioSender  # Import der bereits definierten Kla
 
 # Beispiel: Text senden
 pins = [17, 18, 27]
-sender = GpioSender(pins)
+clock = 18  
+sender = GpioSender(pins, clock)
 
 sender.send_text("Hallo, Welt!")  # Text senden
 
