@@ -1,6 +1,6 @@
 # file_send_example.py
 
-from gpio_sender_receiver import GpioSender  # Import der bereits definierten Klasse
+from gpio_comm.gpio_comm import GpioSender  # Import der bereits definierten Klasse
 
 # Beispiel: Datei senden
 pins = [17, 18, 27]
